@@ -24,6 +24,10 @@
     "linux": {
       "icon": "./res/icon.png"
     },
+    "mac": {
+      "identity": "-",
+      "hardenedRuntime": false
+    },
     "files": [
       "node_modules",
       "dist",

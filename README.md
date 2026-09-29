@@ -67,9 +67,11 @@ To de-quarantine the app on macOS run the following command in the terminal:
 
 - `xattr -d com.apple.quarantine "/path/to/your.app"`
 
-#### Sign the binary
+#### Sign the binary (older releases only)
 
-To codesign the local binary with a self-signing certificate run:
+macOS builds are now ad-hoc signed during the build, so this step is only needed for releases that
+predate that change (macOS reports them as damaged or "revoked"). To codesign such a binary with a
+self-signing certificate run:
 
 - `codesign --sign - --force --deep "/path/to/your.app"`
 
