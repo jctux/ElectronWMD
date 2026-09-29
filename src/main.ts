@@ -1,4 +1,4 @@
-import { net, app, BrowserWindow, ipcMain, protocol, dialog, FileFilter } from 'electron';
+import { net, app, BrowserWindow, ipcMain, protocol, dialog, shell, FileFilter } from 'electron';
 import { importKeys } from 'networkwm-js';
 import path from 'path';
 import os from 'os';
@@ -33,7 +33,11 @@ function reload(window: BrowserWindow){
     app.exit();
 }
 
-app.commandLine.appendSwitch('ignore-certificate-errors');
+function openExternalLink(url: string) {
+    if (/^https?:\/\//i.test(url)) {
+        shell.openExternal(url);
+    }
+}
 
 export interface Setting {
     name: string;
@@ -75,6 +79,15 @@ function setupSettings(window: BrowserWindow) {
                 store.set('useDownloadPath', newVal);
             },
             state: store.get('useDownloadPath', false) as boolean,
+            type: 'boolean',
+        },
+        {
+            family: 'Functionality',
+            name: 'Accept Invalid HTTPS Certificates',
+            async handleChange(newVal: boolean){
+                store.set('acceptInvalidCertificates', newVal);
+            },
+            state: store.get('acceptInvalidCertificates', false) as boolean,
             type: 'boolean',
         },
         store.get('useDownloadPath', false) ? {
@@ -232,6 +245,18 @@ async function createWindow() {
     });
 
     console.log(app.getPath('exe'))
+
+    // External pages must never load inside the app, where they would get the preload's `window.native` API
+    window.webContents.setWindowOpenHandler(({ url }) => {
+        openExternalLink(url);
+        return { action: 'deny' };
+    });
+    window.webContents.on('will-navigate', (event, url) => {
+        if (!url.startsWith('sandbox://app/')) {
+            event.preventDefault();
+            openExternalLink(url);
+        }
+    });
 
     await integrate(window);
     window.setMenuBarVisibility(false);
@@ -516,6 +541,15 @@ async function integrate(window: BrowserWindow) {
         }
     }
 }
+
+app.on('certificate-error', (event, _webContents, url, error, _certificate, callback) => {
+    // Opt-in only, e.g. for a self-hosted remote encoder with a self-signed certificate
+    if (new Store().get('acceptInvalidCertificates', false)) {
+        console.log(`Accepting invalid certificate for ${url} (${error})`);
+        event.preventDefault();
+        callback(true);
+    }
+});
 
 contextMenu({
     showInspectElement: false,
