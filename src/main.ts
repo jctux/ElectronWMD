@@ -1,6 +1,7 @@
 import { net, app, BrowserWindow, ipcMain, protocol, dialog, shell, FileFilter } from 'electron';
 import { importKeys } from 'networkwm-js';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import os from 'os';
 import fs from 'fs';
 import { EWMDHiMD, EWMDNetMD } from './wmd/translations';
@@ -499,30 +500,41 @@ async function integrate(window: BrowserWindow) {
         }
     }
 
+    // Lets song recognition reach Shazam without CORS - the renderer must not be able to fetch anything else
+    const unrestrictedFetchHosts = ['amp.shazam.com'];
     ipcMain.handle('_unrestrictedFetch', async (_: any, url: string, parameters: any) => {
-        return await (await fetch(url, parameters)).text();
+        const target = new URL(url);
+        if (target.protocol !== 'https:' || !unrestrictedFetchHosts.includes(target.hostname)) {
+            throw new Error(`Fetching from ${target.origin} is not allowed`);
+        }
+        return await (await fetch(target.href, parameters)).text();
     });
 
     ipcMain.handle('_signHiMDDisc', () => (global as any).signHiMDDisc());
     ipcMain.handle('_signNWJS', () => (global as any).signNWJS());
 
-    ipcMain.handle('_debug_himdPullFile', async (e, a: string, b: string) => {
-        console.log(`Pulling HiMD file ${a} to local ${b}`);
-        const handle = await himdService.fsDriver!.fatfs!.open(a, false);
-        if(!handle){
-            console.log("No file!");
-        }
-        fs.writeFileSync(b, await handle.readAll());
-        await handle.close();
-    });
-    ipcMain.handle('_debug_himdList', async (e, a: string) => {
-        console.log(`Listing HiMD dir ${a}`);
-        const list = await himdService.fsDriver!.fatfs!.listDir(a);
-        if(!list){
-            console.log("No such dir!");
-        }
-        console.log(list.join(', '));
-    });
+    // These write to arbitrary host paths - development builds (or EWMD_DEBUG=1) only
+    if (!app.isPackaged || process.env.EWMD_DEBUG) {
+        ipcMain.handle('_debug_himdPullFile', async (e, a: string, b: string) => {
+            console.log(`Pulling HiMD file ${a} to local ${b}`);
+            const handle = await himdService.fsDriver!.fatfs!.open(a, false);
+            if(!handle){
+                console.log("No file!");
+                return;
+            }
+            fs.writeFileSync(b, await handle.readAll());
+            await handle.close();
+        });
+        ipcMain.handle('_debug_himdList', async (e, a: string) => {
+            console.log(`Listing HiMD dir ${a}`);
+            const list = await himdService.fsDriver!.fatfs!.listDir(a);
+            if(!list){
+                console.log("No such dir!");
+                return;
+            }
+            console.log(list.join(', '));
+        });
+    }
 
     ipcMain.handle("openFileHostDialog", async (_, filters: { name: string, extensions: string[] }[], directory?: boolean): Promise<string | null> => {
         return ewmdOpenDialog(window, filters, directory);     
@@ -566,14 +578,21 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 app.whenReady().then(() => {
+    const rendererRoot = getOfRenderer();
     protocol.handle('sandbox', (rq) => {
-        const filePath = path.normalize(rq.url.substring('sandbox://app/'.length));
-        if (path.isAbsolute(filePath) || filePath.includes('..')) {
-            app.quit();
+        // Decode before checking, so that an encoded '..' can't escape the renderer directory either
+        let tgt: string;
+        try {
+            tgt = path.resolve(rendererRoot, '.' + decodeURIComponent(new URL(rq.url).pathname));
+        } catch (_) {
+            return new Response(null, { status: 400 });
         }
-        const tgt = decodeURI(getOfRenderer(filePath));
+        if (!tgt.startsWith(rendererRoot + path.sep)) {
+            console.log(`[SANDBOX]: Refused ${rq.url}`);
+            return new Response(null, { status: 403 });
+        }
         console.log(`[SANDBOX]: Requested ${tgt}`);
-        return net.fetch(`file://${tgt}`);
+        return net.fetch(pathToFileURL(tgt).toString());
     });
     createWindow();
 });
