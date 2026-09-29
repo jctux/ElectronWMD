@@ -1,6 +1,7 @@
 import path from 'path';
 
-const DEFAULT_BASE_DIR = '/tmp';
+// Not /tmp: the helper runs as root, and other users can plant files and symlinks in a world-writable directory
+const DEFAULT_BASE_DIR = '/var/run/ewmd';
 
 export function getSocketDir(baseDir?: string): string {
   return baseDir

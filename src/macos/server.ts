@@ -14,6 +14,21 @@ const canFail = (func: () => void) => {
     try{ func() } catch(_){}
 }
 
+const envId = (name: string) => isFinite(process.env[name] as any) ? parseInt(process.env[name]) : null;
+const originalUid = envId('ORIGINAL_UID') ?? envId('SUDO_UID');
+const originalGid = envId('ORIGINAL_GID') ?? envId('SUDO_GID');
+
+// This process runs as root, so the directory holding its PID file and socket must not be writable
+// by anyone else - otherwise they could plant a symlink or a fake PID file there.
+function ensureSafeWorkDir(){
+    fs.mkdirSync(workDir, { recursive: true, mode: 0o755 });
+    const stat = fs.lstatSync(workDir);
+    const ownerOk = stat.uid === process.getuid!() || stat.uid === originalUid;
+    if(!stat.isDirectory() || !ownerOk || (stat.mode & 0o022)) {
+        throw new Error(`Refusing to use ${workDir}: it must be a directory owned by root or the current user, and not writable by others`);
+    }
+}
+
 function closeAll(){
     canFail(() => fs.unlinkSync(socketName));
     canFail(() => fs.unlinkSync(pidFile));
@@ -25,13 +40,24 @@ function main() {
     console.log(`Base dir: ${workDir}`);
     console.log(`Socket path: ${socketName}`);
     console.log(`PID file: ${pidFile}`);
+    try {
+        ensureSafeWorkDir();
+    } catch(ex) {
+        console.error(String(ex));
+        process.exit(1);
+    }
     if(fs.existsSync(pidFile)) {
         const oldPid = parseInt(fs.readFileSync(pidFile).toString());
-        canFail(() => process.kill(oldPid, 'SIGTERM'));
+        if(Number.isInteger(oldPid) && oldPid > 1) {
+            canFail(() => process.kill(oldPid, 'SIGTERM'));
+        }
         canFail(() => fs.unlinkSync(pidFile));
     }
-    
-    fs.writeFileSync(pidFile, `${process.pid}`);
+
+    // O_EXCL | O_NOFOLLOW: never write through something that appeared at this path in the meantime
+    const pidFd = fs.openSync(pidFile, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o644);
+    fs.writeSync(pidFd, `${process.pid}`);
+    fs.closeSync(pidFd);
     const webusb = WebUSBInterop.create();
 
     Object.defineProperty(global, 'navigator', {
@@ -53,15 +79,14 @@ function main() {
     server.listen(socketName, () => {
         console.log(`Server listening on socket: ${socketName}`);
         try {
-            const originalUid = isFinite(process.env.ORIGINAL_UID as any) ? parseInt(process.env.ORIGINAL_UID) : null;
-            const originalGid = isFinite(process.env.ORIGINAL_GID as any) ? parseInt(process.env.ORIGINAL_GID) : null;
             if (originalUid !== null && originalGid !== null) {
                 try { fs.chownSync(socketName, originalUid, originalGid); } catch (_) {}
                 try { fs.chmodSync(socketName, 0o600); } catch (_) {}
                 console.log(`Socket ownership set to ${originalUid}:${originalGid ?? 0} and mode 0600`);
             } else {
-                fs.chmodSync(socketName, 0o777);
-                console.log('Socket permissions set to 0777 (fallback)');
+                // Never 0777 - that would let any local user drive a root process
+                fs.chmodSync(socketName, 0o600);
+                console.log('Original user unknown - socket left owned by the current user with mode 0600');
             }
         } catch (err) {
             console.error('Failed setting socket ownership/permissions:', err);

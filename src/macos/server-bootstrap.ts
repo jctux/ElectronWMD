@@ -35,9 +35,10 @@ export function startOutsideElectron(executablePath: string, applicationRoot: st
     }
     // Many people know part of the famous quote: "Think different...", but not many know the whole thing:
     // "Think different... Think of all the different ways we can take something simple and fuck it up"
-    // Export critical env vars before invoking sudo; -E preserves them across the boundary
+    // The env vars the helper needs are set inline in the command, so there's no need for `sudo -E`,
+    // which would also carry the rest of the user's environment (NODE_OPTIONS, ...) into a root process.
     const fullCommand = `${envs} "${executablePath}" "${serverPath}" "${userDataPath}" && exit`;
-    const osa = `tell application "Terminal" \n activate \n do script "echo ${btoa(fullCommand)} | base64 -d | sudo -E zsh; exit"\nend tell`;
+    const osa = `tell application "Terminal" \n activate \n do script "echo ${btoa(fullCommand)} | base64 -d | sudo zsh; exit"\nend tell`;
     
     return spawn('/usr/bin/osascript', ['-e', osa]);
 }
