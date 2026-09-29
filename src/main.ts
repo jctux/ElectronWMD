@@ -147,44 +147,76 @@ function setupSettings(window: BrowserWindow) {
     });
 }
 
-function setupEncoder() {
-    function invoke(program: string, args: string[]): Promise<boolean> {
-        return new Promise<boolean>(res => {
+function setupEncoder(window: BrowserWindow) {
+    const store = new Store();
+
+    function invoke(program: string, args: string[]): Promise<number | null> {
+        return new Promise<number | null>(res => {
             const name = path.basename(program);
             const process = spawn(program, args);
-            process.on('close', (e) => res(e === 0));
+            process.on('error', (e) => {
+                console.log(`[${name} - ERROR]: ${e}`);
+                res(null);
+            });
+            process.on('close', (e) => res(e));
             process.stdout.on('data', e => console.log(`[${name} - STDOUT]: ${e.toString().trim()}`));
             process.stderr.on('data', e => console.log(`[${name} - STDERR]: ${e.toString().trim()}`));
         });
     }
 
+    // The renderer runs third-party encoder plugins, so the executable it asks for
+    // has to be confirmed by the user once before it is ever started.
+    async function isEncoderApproved(encoderPath: string) {
+        const approved = store.get('approvedLocalEncoders', []) as string[];
+        if (approved.includes(encoderPath)) return true;
+        const { response } = await dialog.showMessageBox(window, {
+            type: 'question',
+            buttons: ['Allow', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+            message: 'Allow ElectronWMD to run this program as the local ATRAC encoder?',
+            detail: encoderPath,
+        });
+        if (response !== 0) return false;
+        store.set('approvedLocalEncoders', [...approved, encoderPath]);
+        return true;
+    }
+
     ipcMain.handle("invokeLocalEncoder", async (_, encoderPath: string, data: ArrayBuffer, sourceFilename: string, parameters: { format: Codec, enableReplayGain?: boolean }) => {
-        // Pipeline:
-        // inFile.ANY ==(ffmpeg)==> inFile.wav ==(encoder)==> outFile.wav
-        let tempDir = '';
-        if ( os.platform() === 'darwin') {
-            const homeDir = app.getPath('home');
-            tempDir = path.join(homeDir, 'Library','Caches','ElectronWMD');
-        } else {
-            tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atracenc'));
+        if (typeof encoderPath !== 'string' || !path.isAbsolute(encoderPath) || !fs.statSync(encoderPath, { throwIfNoEntry: false })?.isFile()) {
+            throw new Error('The local encoder path must point to an existing file.');
+        }
+        const bitrate = parameters?.format?.bitrate;
+        if (!Number.isInteger(bitrate) || bitrate <= 0) {
+            throw new Error('Invalid bitrate requested from the local encoder.');
+        }
+        if (!(await isEncoderApproved(encoderPath))) {
+            throw new Error('The local encoder was not allowed to run.');
         }
 
-        if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir);
+        let baseDir = os.tmpdir();
+        if (os.platform() === 'darwin') {
+            baseDir = path.join(app.getPath('home'), 'Library', 'Caches', 'ElectronWMD');
+            fs.mkdirSync(baseDir, { recursive: true });
         }
-        const inFilePath = path.join(tempDir, sourceFilename);
-        fs.writeFileSync(inFilePath, new Uint8Array(data));
+        // A fresh directory per call, so parallel encodes can't clobber each other's files
+        const tempDir = fs.mkdtempSync(path.join(baseDir, 'atracenc'));
+        try {
+            // Only the extension of the renderer-provided name is kept - it must not be able to escape tempDir
+            const inFilePath = path.join(tempDir, 'input' + path.extname(String(sourceFilename)));
+            const outFilePath = path.join(tempDir, "output.wav");
+            fs.writeFileSync(inFilePath, new Uint8Array(data));
 
-        const outFilePath = path.join(tempDir, "output.wav");
-        const bitrateString = (parameters.format.bitrate! + '');
-        const allArgs = ['-e', '-br', bitrateString, inFilePath, outFilePath];
-        console.log(`Executing encoder EXE: ${encoderPath}. ARGS: ${allArgs}`);
-        await invoke(encoderPath, allArgs);
-        const rawData = new Uint8Array(fs.readFileSync(outFilePath)).buffer;
-        fs.unlinkSync(outFilePath);
-        fs.unlinkSync(inFilePath);
-        fs.rmdirSync(tempDir);
-        return rawData;
+            const allArgs = ['-e', '-br', bitrate.toString(), inFilePath, outFilePath];
+            console.log(`Executing encoder EXE: ${encoderPath}. ARGS: ${allArgs}`);
+            const exitCode = await invoke(encoderPath, allArgs);
+            if (exitCode !== 0 || !fs.existsSync(outFilePath)) {
+                throw new Error(`The local encoder failed (exit code: ${exitCode}).`);
+            }
+            return new Uint8Array(fs.readFileSync(outFilePath)).buffer;
+        } finally {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
     });
 }
 
@@ -472,7 +504,7 @@ async function integrate(window: BrowserWindow) {
     });
 
     setupSettings(window);
-    setupEncoder();
+    setupEncoder(window);
 
     // On a USB disconnect event, enumerate services, check if any was connected
     const addKnownDeviceCB = webusb.addKnownDevice.bind(webusb);
