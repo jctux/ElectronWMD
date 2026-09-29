@@ -55,18 +55,23 @@ export class Connection {
     deviceDisconnectedCallback?: () => void;
 
     connect(){
-        return new Promise<void>(res => {
+        return new Promise<void>((res, rej) => {
             this.socket = new Socket();
             this.outStream = new PackrStream({
                 copyBuffers: true,
                 structuredClone: true,
             });
+            // Before connecting, an error (e.g. ECONNREFUSED on a stale socket file) rejects.
+            // Afterwards it is only logged - an unhandled 'error' event would crash the main process.
+            this.socket.once('error', rej);
             this.socket.on('connect', (err: boolean) => {
                 if(err){
                     console.log("Error!");
                     return
                 }
                 console.log('Connected');
+                this.socket.off('error', rej);
+                this.socket.on('error', (e) => console.log('Helper connection error:', e));
 
                 const unpackerStream = new UnpackrStream({
                     copyBuffers: true,
@@ -79,6 +84,7 @@ export class Connection {
                         if(name !== this.awaitingReturnName){
                             console.log(`Mismatch between awaited return and actual (${this.awaitingReturnName} != ${name})`);
                             this.awaitingReturnReject("mismatch");
+                            return;
                         }
                         // value is [out, err]
                         if(value[1]){
@@ -105,12 +111,18 @@ export class Connection {
         this.earlyTerminate = true;
     }
 
-    async awaitConnection(){
+    // The helper only starts once the user has entered their password in Terminal,
+    // so give up eventually instead of polling forever when they close it or it fails.
+    async awaitConnection(timeoutMs = 3 * 60 * 1000){
         this.socket = null;
         this.earlyTerminate = false;
         console.log("Waiting for server to start...");
+        const deadline = Date.now() + timeoutMs;
         await new Promise<void>(res => {
             let interval = setInterval(() => {
+                if(Date.now() > deadline) {
+                    this.earlyTerminate = true;
+                }
                 try{
                     if(this.earlyTerminate || fs.statSync(getSocketPath()).isSocket()){
                         clearInterval(interval);
