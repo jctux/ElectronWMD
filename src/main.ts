@@ -146,7 +146,7 @@ function setupSettings(window: BrowserWindow) {
 
     ipcMain.handle("setting_update", async (_, name: string, newValue: Setting['state']) => {
         const setting = settings.find(e => e.name === name);
-        if((setting as any).handleChange){
+        if((setting as any)?.handleChange){
             await (setting as any).handleChange(newValue);
             setupSettings(window);
         }
@@ -287,11 +287,13 @@ async function createWindow() {
 
 function getDefinedFunctions(currentObj: any){
     const defined = new Set<string>();
-    do{
+    // Stop before Object.prototype - its methods (constructor, __defineSetter__, ...) must not become IPC handlers
+    while (currentObj && currentObj !== Object.prototype) {
         Object.getOwnPropertyNames(currentObj)
-        .filter((n) => typeof currentObj[n] == 'function' && !(n in defined))
+        .filter((n) => n !== 'constructor' && typeof currentObj[n] == 'function')
         .forEach(defined.add.bind(defined));
-    } while ((currentObj = Object.getPrototypeOf(currentObj)));
+        currentObj = Object.getPrototypeOf(currentObj);
+    }
     return defined;
 }
 
@@ -375,7 +377,7 @@ async function integrate(window: BrowserWindow) {
             shouldAbortAtracDownload = false;
 
             const enableHandleBadSector = allArgs[3].handleBadSector;
-            const enableShouldCancelImmediately = allArgs[3].handleBadSector;
+            const enableShouldCancelImmediately = allArgs[3].shouldCancelImmediately;
 
             allArgs[3] = {
                 ...allArgs[3],
@@ -461,7 +463,7 @@ async function integrate(window: BrowserWindow) {
             });
         }
 
-        const nwjsDefinedMethods = getDefinedFunctions(himdService);
+        const nwjsDefinedMethods = getDefinedFunctions(nwService);
         ipcMain.handle('_nwjs__definedParameters', () => [...nwjsDefinedMethods].map(e => '_nwjs_' + e));
         for(let methodName of nwjsDefinedMethods){
             ipcMain.handle(`_nwjs_${methodName}`, async (_, ...allArgs: any[]) => {
